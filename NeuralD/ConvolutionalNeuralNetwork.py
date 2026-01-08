@@ -7,29 +7,29 @@ import re
 import matplotlib.pyplot as plt
 
 class CNN:
-    # each "layer" specified counts for one conv and one pooling layer (does not inclue input layer)
+    # each "layer" specified counts for one conv and one pooling layer (does not inclue input layer or output layer)
     # kernel size might need to be odd, dont really care to check weather or not thats true
     def __init__(self, inputSize: tuple[int, int], outputSize: tuple[int, int], kernelSize: int, poolerSize: int, layers: int, kernelsPerLayer: int): 
         self.inputSize = inputSize
         self.outputSize = outputSize
         self.kernelSize = kernelSize
         self.poolerSize = poolerSize
-        self.numLayers = layers
+        self.numLayers = layers + 1
         self.kernelsPerLayer = kernelsPerLayer
 
         self.inputs = []
         self.outputs = []
 
-        self.kernelLayers = [self.initKernels() for _ in range(layers)]
+        self.kernelLayers = [self.initKernels() for _ in range(layers + 1)]
         self.layers = [] # both pooling and conv layers
         self.preActivation = [] # post activation function is stored in layers. i think. i am so tired idk anymore
-        self.poolerLayers = [self.initPoolers() for _ in range(layers)]
-        self.biases = [[random.random() for _ in range(kernelsPerLayer)] for _ in range(layers)]
+        self.poolerLayers = [self.initPoolers() for _ in range(layers + 1)]
+        self.biases = [[0 for _ in range(kernelsPerLayer)] for _ in range(layers + 1)]
 
         self.distanceFromKernelCenter = int(kernelSize/2) # divide by 2, always round down
 
     def initKernel(self, kernelSize: int):
-        return [[random.random() for _ in range(kernelSize)] for _ in range(kernelSize)]
+        return [[random.uniform(-0.1, 0.1) for _ in range(kernelSize)] for _ in range(kernelSize)]
 
     def initKernels(self):
         return [self.initKernel(self.kernelSize) for _ in range(self.kernelsPerLayer)]
@@ -58,11 +58,8 @@ class CNN:
     def addInputs(self, inputs: tuple[int, int]):
         self.inputs = inputs
 
-    def dotProduct(self, input1: list[list[int]], input2: list[list[int]]):
-        flattenedIn1 = [item for sublist in input1 for item in sublist]
-        flattenedIn2 = [item for sublist in input2 for item in sublist]
-
-        return sum([flattenedIn1[index]*flattenedIn2[index] for index in range(len(flattenedIn1))])
+    def dotProduct(self, input1, input2):
+        return float(np.sum(np.array(input1, dtype=np.float32) * np.array(input2, dtype=np.float32)))
     
     def pad(self, image, pad):
         h = len(image)
@@ -115,7 +112,10 @@ class CNN:
         # input layer -> first hidden layer
         layer = []
         layerPreAct = []
+
         self.layers = []
+        self.preActivation = []
+
         pad = self.distanceFromKernelCenter
         padded_input = self.pad(self.inputs, pad)
         for kernelIndex in range(len(self.kernelLayers[0])):
@@ -153,12 +153,11 @@ class CNN:
         # should now have a layer list that contains the result of each kernel convolving across the input (layer[kernelsResult[y[x]]])
         # now for all middle layers and output
 
-        for layerIndex in range(1, self.numLayers+1):
+        for layerIndex in range(1, self.numLayers):
             layer = []
             layerPreAct = []
             pad = self.distanceFromKernelCenter
-            kernels = len(self.kernelLayers[layerIndex-1]) if layerIndex < self.numLayers else 1
-            for kernelIndex in range(kernels):
+            for kernelIndex in range(self.kernelsPerLayer):
                 kernelOutputForLayer = []
                 for kernalOutputOfPrevLayerIndex in range(len(self.layers[layerIndex-1])):
                     padded_input = self.pad(self.layers[layerIndex-1][kernalOutputOfPrevLayerIndex], pad)
@@ -176,7 +175,7 @@ class CNN:
                                 ] for yPos in range(self.kernelSize)
                             ]
 
-                            result = self.dotProduct(kernelInput, self.kernelLayers[layerIndex-1][kernelIndex])
+                            result = self.dotProduct(kernelInput, self.kernelLayers[layerIndex][kernelIndex])
                             yLayer.append(result)
 
                         prevLayersForAvr.append(yLayer)
@@ -184,7 +183,7 @@ class CNN:
                     kernelOutputForLayer.append(prevLayersForAvr)
                     
                 avr = self.avrAll(kernelOutputForLayer)
-                avr = self.addValue(avr, self.biases[layerIndex-1][kernelIndex])
+                avr = self.addValue(avr, self.biases[layerIndex][kernelIndex])
                 layerPreAct.append(avr)
                 layer.append(self.applyLeakyReLU(avr))
             self.layers.append(layer)
@@ -193,8 +192,8 @@ class CNN:
     def getOutputs(self):
         return self.layers[-1]
     
-    def compute_prev_gradient(frontGradient, kernel):
-        # flip kernel
+    def compute_prev_gradient(self, frontGradient, kernel):
+        kernel = np.asarray(kernel, dtype=np.float32)
         flipped_kernel = np.flip(np.flip(kernel, 0), 1)
         
         pad = kernel.shape[0] - 1
@@ -215,10 +214,11 @@ class CNN:
     
     def backpropagate(self, correctOutput: list[list[float]], learningRate: float):
         # loss of output layer is vector of outpits - vector of expected outputs
-        expectedOutput = np.array(correctOutput)
-        actualOutput = np.array(self.layers[-1])
-
-        outputGradient = (actualOutput - expectedOutput) * np.array(self.leakyReLU_derivative_matrix(self.preActivation[-1][0])) # if the prev value is increased by the ammount in this matrix, the loss will increase
+        expectedOutput = np.array(correctOutput, dtype=np.float32)          # (H, W)
+        actualOutput = np.array(self.layers[-1][0], dtype=np.float32)          # (1, H, W)
+        deriv = np.array(self.leakyReLU_derivative_matrix(self.preActivation[-1][0]), dtype=np.float32)  # (H, W)
+        outputGrad2D = (actualOutput - expectedOutput) * deriv
+        outputGrad2D = np.clip(outputGrad2D, -10.0, 10.0)
 
         # output kernel gradients
         pad = self.distanceFromKernelCenter
@@ -227,7 +227,7 @@ class CNN:
             kernel_grad = np.zeros((self.kernelSize, self.kernelSize))
             padded_input = self.pad(self.layers[-2][i], pad)
             for outputIndexY in range(len(self.layers[-1][0])): # this should go thru every output not flattened
-                yOutput = outputGradient[outputIndexY]
+                yOutput = outputGrad2D[outputIndexY]
                 for outputIndexX in range(len(yOutput)):
                     kernelOutput = yOutput[outputIndexX]
 
@@ -238,17 +238,22 @@ class CNN:
                     ])
 
                     kernel_grad += kernelInput * kernelOutput
-                    kernel_grads.append(kernel_grad)
+            #kernel_grad /= (len(self.layers[-1][0]) * len(self.layers[-1][0][0]) * len(self.layers[-2]))
+            grad_norm = np.linalg.norm(kernel_grad)
+            if grad_norm > 5.0:
+                kernel_grad *= (5.0 / grad_norm)
+            kernel_grads.append(kernel_grad)
          
-        self.kernelLayers[-1][0] = (np.array(self.kernelLayers[-1][0]) - (np.sum(np.array(kernel_grads, axis=0)) * learningRate)).tolist()
-        self.biases[-1][0] -= learningRate * np.sum(outputGradient)
+        self.kernelLayers[-1][0] = (np.array(self.kernelLayers[-1][0]) - (np.sum(np.array(kernel_grads), axis = 0) * learningRate)).tolist()
+        self.biases[-1][0] -= learningRate * np.sum(outputGrad2D)
 
-        frontGradient = outputGradient
+        frontGradient = outputGrad2D
         for layerIndex in range(2, len(self.layers)):
             
             frontGradSum = 0
             for kernelIndex in range(len(self.kernelLayers[-layerIndex])):
                 prevGradient = self.compute_prev_gradient(frontGradient, self.kernelLayers[-layerIndex][kernelIndex])
+                prevGradient = np.clip(prevGradient, -10.0, 10.0)
                 frontGradSum += prevGradient
                 pad = self.distanceFromKernelCenter
                 kernel_grads = []
@@ -270,51 +275,75 @@ class CNN:
                             ])
 
                             kernel_grad += kernelInput * kernelOutput
-                            kernel_grads.append(kernel_grad)
+
+                    #kernel_grad /= (len(self.layers[-layerIndex][kernelIndex]) * len(self.layers[-layerIndex][kernelIndex][0]) * len(self.layers[-layerIndex-1]))
+                    grad_norm = np.linalg.norm(kernel_grad)
+                    if grad_norm > 5.0:
+                        kernel_grad *= (5.0 / grad_norm)
+                    kernel_grads.append(kernel_grad)
                 
-                self.kernelLayers[-layerIndex][kernelIndex] = (np.array(self.kernelLayers[-layerIndex][kernelIndex]) - (np.sum(np.array(kernel_grads, axis=0)) * learningRate)).tolist()
+                self.kernelLayers[-layerIndex][kernelIndex] = (np.array(self.kernelLayers[-layerIndex][kernelIndex]) - (np.sum(np.array(kernel_grads), axis = 0) * learningRate)).tolist()
                 self.biases[-layerIndex][kernelIndex] -= learningRate * np.sum(prevGradient)
 
-            frontGradient = frontGradSum
+            frontGradient = np.clip(frontGradSum / max(1, len(self.kernelLayers[-layerIndex])), -10.0, 10.0)
     
 
-if __name__ == "__main__":
+def train_on_symbols(network: CNN, iterations=1000, lr=0.0001):
+    # X image: 1s on diagonals
+    x_img = [
+        [1, 0, 0, 0, 1],
+        [0, 1, 0, 1, 0],
+        [0, 0, 1, 0, 0],
+        [0, 1, 0, 1, 0],
+        [1, 0, 0, 0, 1]
+    ]
+    
+    # Check mark: roughly 1s in a check pattern
+    check_img = [
+        [0, 0, 0, 1, 0],
+        [0, 0, 1, 0, 0],
+        [0, 1, 0, 0, 0],
+        [1, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0]
+    ]
+    
+    training_data = [
+        (x_img, x_img),       # train to reproduce X
+        (check_img, check_img) # train to reproduce check
+    ]
+    
+    for it in range(iterations):
+        for input_img, target_img in training_data:
+            network.addInputs(input_img)
+            network.forwardPass()
+            network.backpropagate(target_img, learningRate=lr)
+        if (it+1) % (iterations//10) == 0:
+            print(f"Training iteration {it+1}/{iterations} complete")
 
+if __name__ == "__main__":
     random.seed(0)
     np.random.seed(0)
 
-    test_input = [
-        [0, 0, 0, 0, 0],
-        [0, 1, 1, 1, 0],
-        [0, 1, 1, 1, 0],
-        [0, 1, 1, 1, 0],
-        [0, 0, 0, 0, 0]
-    ]
-
     network = CNN(
-        inputSize=(5,5),
-        outputSize=(5,5),
+        inputSize=(5, 5),
+        outputSize=(5, 5),
         kernelSize=3,
-        poolerSize=2,
+        poolerSize=1,
         layers=1,
-        kernelsPerLayer=2
+        kernelsPerLayer=1
     )
 
-    # Add input
-    network.addInputs(test_input)
+    train_on_symbols(network, iterations=3000, lr=0.01)
 
-    # Forward pass
-    network.forwardPass()
-
-    # Get outputs
-    outputs = network.getOutputs()
-
-    # Print outputs
-    for k_index, kernel_output in enumerate(outputs):
-        print(f"Kernel {k_index} output:")
-        for row in kernel_output:
-            print(["{0:.2f}".format(val) for val in row])
-        print()
-    
-
-    
+    # Test outputs
+    for symbol_name, symbol_img in [("X", [[1,0,0,0,1],[0,1,0,1,0],[0,0,1,0,0],[0,1,0,1,0],[1,0,0,0,1]]),
+                                    ("Check", [[0,0,0,1,0],[0,0,1,0,0],[0,1,0,0,0],[1,0,0,0,0],[0,0,0,0,0]])]:
+        network.addInputs(symbol_img)
+        network.forwardPass()
+        output = network.getOutputs()
+        print(f"{symbol_name} output:")
+        for k_index, kernel_output in enumerate(output):
+            print(f"Kernel {k_index}:")
+            for row in kernel_output:
+                print(["{0:.2f}".format(val) for val in row])
+            print()
